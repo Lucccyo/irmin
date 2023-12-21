@@ -24,37 +24,34 @@ exception Dangling_hash
 let invalid_read fmt = Fmt.kstr (fun s -> raise (Invalid_read s)) fmt
 let corrupted_store fmt = Fmt.kstr (fun s -> raise (Corrupted_store s)) fmt
 
-module UnsafeTbl (K : Irmin.Hash.S) = Hashtbl.Make (struct
+module HashedTypeK (K : Irmin.Hash.S) = struct
   type t = K.t
 
   let hash = K.short_hash
   let equal = Irmin.Type.(unstage (equal K.t))
-end)
+end
 
 (** Safe but might be incredibly slow. *)
 module Table (K : Irmin.Hash.S) = struct
-  module Unsafe = UnsafeTbl (K)
+  module HTK = HashedTypeK(K)
 
-  type 'a t = { lock : Eio.Mutex.t; data : 'a Unsafe.t }
+  type 'a t = (K.t, 'a) Kcas_data.Hashtbl.t
 
   let create n =
-    let lock = Eio.Mutex.create () in
-    let data = Unsafe.create n in
-    { lock; data }
+    Kcas_data.Hashtbl.create ~min_buckets:n ~hashed_type:(module HTK) ()
 
-  let add { lock; data } k v =
-    Eio.Mutex.use_rw ~protect:true lock @@ fun () -> Unsafe.add data k v
+  (* TODO: can we use `replace` instead of `add` here?
+     Does Irmin need multiple bindings for the same key? *)
+  let add t k v = Kcas_data.Hashtbl.add t k v
 
-  let mem { lock; data } k =
-    Eio.Mutex.use_rw ~protect:true lock @@ fun () -> Unsafe.mem data k
+  let mem t k = Kcas_data.Hashtbl.mem t k
 
-  let find_opt { lock; data } k =
-    Eio.Mutex.use_rw ~protect:true lock @@ fun () -> Unsafe.find_opt data k
+  let find_opt t k = Kcas_data.Hashtbl.find_opt t k
 
   let find t k = match find_opt t k with Some v -> v | None -> raise Not_found
 
-  let clear { lock; data } =
-    Eio.Mutex.use_rw ~protect:true lock @@ fun () -> Unsafe.clear data
+  let clear t = Kcas_data.Hashtbl.clear t
+
 end
 
 module Make_without_close_checks

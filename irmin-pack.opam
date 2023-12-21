@@ -35,6 +35,8 @@ pin-depends: [
   [ "terminal.dev" "git+https://github.com/art-w/progress#029cbc07a5c8def11cba53a3a20dd5954d9928f4" ]
   [ "progress.dev" "git+https://github.com/art-w/progress#029cbc07a5c8def11cba53a3a20dd5954d9928f4" ]
   [ "index.dev" "git+https://github.com/art-w/index#893613afe09b1af36bb7532e00de1b157ce1fe59" ]
+  [ "kcas.dev" "git+https://github.com/ocaml-multicore/kcas#db1a8bed3f99b453a8511dcfb4a7aa86ddca849f"]
+  [ "kcas_data.dev" "git+https://github.com/ocaml-multicore/kcas#db1a8bed3f99b453a8511dcfb4a7aa86ddca849f"]
 ]
 
 synopsis: "Irmin backend which stores values in a pack file"

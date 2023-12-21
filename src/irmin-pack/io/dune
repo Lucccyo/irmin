@@ -8,6 +8,8 @@
   irmin-pack
   logs
   eio
+  kcas
+  kcas_data
   mtime
   progress.engine
   cmdliner
