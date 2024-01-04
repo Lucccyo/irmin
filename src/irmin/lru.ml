@@ -17,173 +17,159 @@
 (* Extracted from https://github.com/pqwy/lru *)
 
 module MakeUnsafe (H : Hashtbl.HashedType) = struct
-  module HT = Hashtbl.Make (H)
+  open Kcas
 
   module Q = struct
     type 'a node = {
       value : 'a;
-      mutable next : 'a node option;
-      mutable prev : 'a node option;
+      next : 'a node option Loc.t;
+      prev : 'a node option Loc.t;
     }
 
-    type 'a t = {
-      mutable first : 'a node option;
-      mutable last : 'a node option;
-    }
+    type 'a t = { first : 'a node option Loc.t; last : 'a node option Loc.t }
 
-    let detach t n =
-      let np = n.prev and nn = n.next in
+    let detach ~xt t n =
+      let np = Xt.get ~xt n.prev and nn = Xt.get ~xt n.next in
       (match np with
-      | None -> t.first <- nn
+      | None -> Xt.set ~xt t.first nn
       | Some x ->
-          x.next <- nn;
-          n.prev <- None);
+          Xt.set ~xt x.next nn;
+          Xt.set ~xt n.prev None);
       match nn with
-      | None -> t.last <- np
+      | None -> Xt.set ~xt t.last np
       | Some x ->
-          x.prev <- np;
-          n.next <- None
+          Xt.set ~xt x.prev np;
+          Xt.set ~xt n.next None
 
-    let append t n =
+    let append ~xt t n =
       let on = Some n in
-      match t.last with
+      match Xt.get ~xt t.last with
       | Some x as l ->
-          x.next <- on;
-          t.last <- on;
-          n.prev <- l
+          Xt.set ~xt x.next on;
+          Xt.set ~xt t.last on;
+          Xt.set ~xt n.prev l
       | None ->
-          t.first <- on;
-          t.last <- on
+          Xt.set ~xt t.first on;
+          Xt.set ~xt t.last on
 
-    let node x = { value = x; prev = None; next = None }
-    let create () = { first = None; last = None }
+    let node x = { value = x; prev = Loc.make None; next = Loc.make None }
+    let create () = { first = Loc.make None; last = Loc.make None }
 
-    let iter t f =
+    let iter ~xt t f =
       let rec aux f = function
         | Some n ->
-            let next = n.next in
+            let next = Xt.get ~xt n.next in
             f n.value;
             aux f next
         | _ -> ()
       in
-      aux f t.first
+      aux f (Xt.get ~xt t.first)
 
-    let clear t =
-      t.first <- None;
-      t.last <- None
+    let clear ~xt t =
+      Xt.set ~xt t.first None;
+      Xt.set ~xt t.last None
   end
 
-  type key = HT.key
+  type key = H.t
 
   type 'a t = {
-    ht : (key * 'a) Q.node HT.t;
+    ht : (key, (key * 'a) Q.node) Kcas_data.Hashtbl.t;
     q : (key * 'a) Q.t;
-    mutable cap : cap;
-    mutable w : int;
+    cap : cap Loc.t;
+    w : int Loc.t;
   }
 
   and cap = Uncapped | Capped of int
 
-  let weight t = t.w
+  let weight ~xt t = Xt.get ~xt t.w
 
   let create cap =
     let cap, ht_cap =
       if cap < 0 then (Uncapped, 65536) else (Capped cap, cap)
     in
-    { cap; w = 0; ht = HT.create ht_cap; q = Q.create () }
+    {
+      cap = Loc.make cap;
+      w = Loc.make 0;
+      ht =
+        Kcas_data.Hashtbl.create ~min_buckets:ht_cap ~hashed_type:(module H) ();
+      q = Q.create ();
+    }
 
-  let drop t =
-    match t.q.first with
+  let drop ~xt t =
+    match Xt.get ~xt t.q.first with
     | None -> None
     | Some ({ Q.value = k, v; _ } as n) ->
-        t.w <- t.w - 1;
-        HT.remove t.ht k;
-        Q.detach t.q n;
+        Xt.decr ~xt t.w;
+        Kcas_data.Hashtbl.Xt.remove ~xt t.ht k;
+        Q.detach ~xt t.q n;
         Some v
 
-  let remove t k =
-    try
-      let n = HT.find t.ht k in
-      t.w <- t.w - 1;
-      HT.remove t.ht k;
-      Q.detach t.q n
-    with Not_found -> ()
+  let remove ~xt t k =
+    match Kcas_data.Hashtbl.Xt.find_opt ~xt t.ht k with
+    | Some n ->
+        Xt.decr ~xt t.w;
+        Kcas_data.Hashtbl.Xt.remove ~xt t.ht k;
+        Q.detach ~xt t.q n
+    | None -> ()
 
-  let add t k v =
+  let add ~xt t k v =
     let add t k v =
-      remove t k;
+      remove ~xt t k;
       let n = Q.node (k, v) in
-      t.w <- t.w + 1;
-      HT.add t.ht k n;
-      Q.append t.q n
+      Xt.incr ~xt t.w;
+      Kcas_data.Hashtbl.Xt.add ~xt t.ht k n;
+      Q.append ~xt t.q n
     in
-    match t.cap with
+    match Xt.get ~xt t.cap with
     | Capped c when c = 0 -> ()
     | Uncapped -> add t k v
     | Capped c ->
         add t k v;
-        if weight t > c then
-          let _ = drop t in
+        if weight ~xt t > c then
+          let _ = drop ~xt t in
           ()
 
-  let promote t k =
-    try
-      let n = HT.find t.ht k in
-      Q.(
-        detach t.q n;
-        append t.q n)
-    with Not_found -> ()
+  let promote ~xt t k =
+    match Kcas_data.Hashtbl.Xt.find_opt ~xt t.ht k with
+    | Some n ->
+        Q.(
+          detach ~xt t.q n;
+          append ~xt t.q n)
+    | None -> ()
 
-  let find_opt t k =
-    match HT.find_opt t.ht k with
+  let find_opt ~xt t k =
+    match Kcas_data.Hashtbl.Xt.find_opt ~xt t.ht k with
     | Some v ->
-        promote t k;
+        promote ~xt t k;
         Some (snd v.value)
     | None -> None
 
-  let mem t k =
-    match HT.mem t.ht k with
+  let mem ~xt t k =
+    match Kcas_data.Hashtbl.Xt.mem ~xt t.ht k with
     | false -> false
     | true ->
-        promote t k;
+        promote ~xt t k;
         true
 
-  let iter t f = Q.iter t.q (fun (k, v) -> f k v)
+  let iter ~xt t f = Q.iter ~xt t.q (fun (k, v) -> f k v)
 
-  let clear t =
-    t.w <- 0;
-    HT.clear t.ht;
-    Q.clear t.q
+  let clear ~xt t =
+    Loc.set t.w 0;
+    Kcas_data.Hashtbl.Xt.clear ~xt t.ht;
+    Q.clear ~xt t.q
 end
 
-(** Safe but might be incredibly slow. *)
 module Make (H : Hashtbl.HashedType) = struct
   module Unsafe = MakeUnsafe (H)
 
-  type 'a t = { lock : Eio.Mutex.t; data : 'a Unsafe.t }
+  type 'a t = 'a Unsafe.t
 
-  let create cap =
-    let lock = Eio.Mutex.create () in
-    let data = Unsafe.create cap in
-    { lock; data }
-
-  let add { lock; data } k v =
-    Eio.Mutex.use_rw ~protect:true lock @@ fun () -> Unsafe.add data k v
-
-  let find_opt { lock; data } k =
-    Eio.Mutex.use_rw ~protect:true lock @@ fun () -> Unsafe.find_opt data k
-
+  let create cap = Unsafe.create cap
+  let add data k v = Kcas.Xt.commit { tx = Unsafe.add data k v }
+  let find_opt data k = Kcas.Xt.commit { tx = Unsafe.find_opt data k }
   let find t k = match find_opt t k with Some v -> v | None -> raise Not_found
-
-  let mem { lock; data } k =
-    Eio.Mutex.use_rw ~protect:true lock @@ fun () -> Unsafe.mem data k
-
-  let iter { lock; data } f =
-    Eio.Mutex.use_rw ~protect:true lock @@ fun () -> Unsafe.iter data f
-
-  let clear { lock; data } =
-    Eio.Mutex.use_rw ~protect:true lock @@ fun () -> Unsafe.clear data
-
-  let drop { lock; data } =
-    Eio.Mutex.use_rw ~protect:true lock @@ fun () -> Unsafe.drop data
+  let mem data k = Kcas.Xt.commit { tx = Unsafe.mem data k }
+  let iter data f = Kcas.Xt.commit { tx = Unsafe.iter data f }
+  let clear data = Kcas.Xt.commit { tx = Unsafe.clear data }
+  let drop data = Kcas.Xt.commit { tx = Unsafe.drop data }
 end

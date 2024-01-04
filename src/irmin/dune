@@ -8,6 +8,8 @@
   digestif
   fmt
   jsonm
+  kcas
+  kcas_data
   logs
   logs.fmt
   eio
